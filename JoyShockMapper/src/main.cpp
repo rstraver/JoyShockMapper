@@ -593,6 +593,7 @@ public:
 	float delta_flick = 0.0;
 	float flick_percent_done = 0.0;
 	float flick_rotation_counter = 0.0;
+	float flick_strength = 0.0;
 	FloatXY left_last_cal;
 	FloatXY right_last_cal;
 	FloatXY motion_last_cal;
@@ -1631,7 +1632,7 @@ bool do_SLEEP(in_string argument)
 	printf("Sleeping for %.3f second(s)...\n", sleepTime);
 	std::this_thread::sleep_for(std::chrono::milliseconds((int)(sleepTime * 1000)));
 	printf("Finished sleeping.\n");
-	
+
 	return true;
 }
 
@@ -1678,16 +1679,18 @@ static float handleFlickStick(float calX, float calY, float lastCalX, float last
 	float lastOffsetX = lastCalX;
 	float lastOffsetY = lastCalY;
 	float flickStickThreshold = 0.995f;
-	if (isFlicking)
-	{
-		flickStickThreshold *= 0.9f;
-	}
-	if (stickLength >= flickStickThreshold) {
+	float flickStartThreshold = 0.10f;
+	// if (isFlicking)
+	// {
+	// 	flickStickThreshold *= 0.9f;
+	// }
+
+	if (stickLength >= flickStartThreshold) {
 		float stickAngle = atan2(-offsetX, offsetY);
 		//printf(", %.4f\n", lastOffsetLength);
-		if (!isFlicking) {
-			// bam! new flick!
-			isFlicking = true;
+		if (!isFlicking || (stickLength > jc->flick_strength && jc->flick_strength <= flickStickThreshold)) {
+			jc->flick_strength = stickLength;
+			// better flick than none or existing, update goals
 			if (!ROTATE_ONLY)
 			{
 				auto flick_snap_mode = jc->getSetting<FlickSnapMode>(SettingID::FLICK_SNAP_MODE);
@@ -1709,17 +1712,32 @@ static float handleFlickStick(float calX, float calY, float lastCalX, float last
 					stickAngle = 0.0f;
 				}
 
-				jc->started_flick = chrono::steady_clock::now();
-				jc->delta_flick = stickAngle;
-				jc->flick_percent_done = 0.0f;
-				jc->ResetSmoothSample();
-				jc->flick_rotation_counter = stickAngle; // track all rotation for this flick
+				if (!isFlicking) {
+					// new flick, setup variables
+					jc->started_flick = chrono::steady_clock::now();
+					jc->flick_percent_done = 0.0f;
+					jc->ResetSmoothSample();
+					jc->delta_flick = stickAngle;
+					jc->flick_rotation_counter = stickAngle; // track all rotation for this flick
+				}
+				else {
+					// update ongoing flick
+					float angleChange = stickAngle - jc->delta_flick;
+					// https://stackoverflow.com/a/11498248/1130520
+					angleChange = fmod(angleChange + PI, 2.0f * PI);
+					if (angleChange < 0)
+						angleChange += 2.0f * PI;
+					angleChange -= PI;
+
+					jc->delta_flick += angleChange;//stickAngle;
+				}
 				// TODO: All these printfs should be hidden behind a setting. User might not want them.
-				printf("Flick: %.3f degrees\n", stickAngle * (180.0f / PI));
+				//printf("Flick: %.3f degrees\n", jc->delta_flick * (180.0f / PI));
 			}
+			isFlicking = true;
 		}
 		else {
-			if (!FLICK_ONLY)
+			if (!FLICK_ONLY && stickLength >= flickStickThreshold || jc->flick_percent_done >= 1.0f)
 			{
 				// not new? turn camera?
 				float lastStickAngle = atan2(-lastOffsetX, lastOffsetY);
@@ -1753,15 +1771,28 @@ static float handleFlickStick(float calX, float calY, float lastCalX, float last
 			last_flick_and_rotation = abs(jc->flick_rotation_counter) / (2.0f * PI);
 		}
 		isFlicking = false;
+
+		// cancel weak flick
+		if (jc->flick_strength < flickStickThreshold){
+			//printf("Nevermind that flick %.3f",stickLength);
+			jc->delta_flick = 0.0f;
+		}
 	}
+
 	// do the flicking
 	float secondsSinceFlick = ((float)chrono::duration_cast<chrono::microseconds>(jc->time_now - jc->started_flick).count()) / 1000000.0f;
 	float newPercent = secondsSinceFlick / jc->getSetting(SettingID::FLICK_TIME);
+
+	// slow down if flick was lazy
+	newPercent *= jc->flick_strength;
 
 	// don't divide by zero
 	if (abs(jc->delta_flick) > 0.0f) {
 		newPercent = newPercent / pow(abs(jc->delta_flick) / PI, jc->getSetting(SettingID::FLICK_TIME_EXPONENT));
 	}
+
+	// limit progress
+	//newPercent = min(newPercent,jc->flick_strength);
 
 	if (newPercent > 1.0f) newPercent = 1.0f;
 	// warping towards 1.0
@@ -1930,7 +1961,7 @@ void processStick(JoyShock* jc, float stickX, float stickY, float lastX, float l
 }
 
 void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime) {
-	
+
 	//printf("DS4 accel: %.4f, %.4f, %.4f\n", imuState.accelX, imuState.accelY, imuState.accelZ);
 	//printf("\tDS4 gyro: %.4f, %.4f, %.4f\n", imuState.gyroX, imuState.gyroY, imuState.gyroZ);
 	MOTION_STATE motion = JslGetMotionState(jcHandle);
@@ -1938,7 +1969,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	//	motion.quatW, motion.quatX, motion.quatY, motion.quatZ,
 	//	motion.accelX, motion.accelY, motion.accelZ,
 	//	motion.gravX, motion.gravY, motion.gravZ);
-	
+
 	bool blockGyro = false;
 	bool lockMouse = false;
 	bool leftAny = false;
